@@ -1,0 +1,108 @@
+function [D_bar, D_tilde, Z_bar, Z_tilde, opts, cost] = LRSDL_mod2_lr(Y, train_label, opts, init_seed)
+    %% Parameter preparation
+    rng(init_seed, 'twister');
+    C = max(train_label);    
+    Y_range = label_to_range(train_label);
+
+    %% Initialization
+    D_tilde = normrnd(0, 1, size(Y, 1), opts.k_tilde);
+    D_bar = normrnd(0, 1, size(Y, 1), opts.k_bar);    
+    Z_tilde = normrnd(0, 1, opts.k_tilde, size(Y, 2));
+    Z_bar = normrnd(0, 1, opts.k_bar, size(Y, 2));   
+  
+    %% Options for subproblems
+    optsZ = opts;
+    optsZ.max_iter = 100000;
+    optsZ.show_progress = 0;
+    optsZ.verboseX = 0;
+    
+    H1 = [];
+    for c = 1:C
+        Nc = Y_range(c+1) - Y_range(c);
+        H1(end+1:end+Nc, end+1:end+Nc) = ones(Nc)/Nc;
+    end
+    N = Y_range(C+1);
+    H2 = ones(N)/N;
+    opts.H_tilde = 2*eye(N)-2*H1+H2;
+       
+    %% Start main loop    
+    iter = 0;
+    D_old_tilde = D_tilde;
+    D_old_bar = D_bar;
+    D_old = [D_bar, D_tilde];
+    [costs, diff_tildes, diff_bars, diffs] = deal([], [], [], []);
+    cost_old = 1e6;
+    %{
+    D_range = opts.k_tilde * (0:1);
+    opts.k0 = opts.k_bar;
+    opts.k = opts.k_tilde;
+    opts.verbose = 0;
+    opts.max_iter = 1000; 
+    opts.initmode = 'normal';
+    [D_tilde, D_bar, Z_tilde, Z_bar] = LRSDL_init(Y, [0 Y_range(end)], D_range, opts,init_seed);
+    
+    fn = fullfile("data", "info.mat");
+    save(fn, "D_tilde", "D_bar", "Z_tilde", "Z_bar");
+    %}
+    while iter < opts.max_iter
+        iter = iter + 1;
+        [Z_bar, Z_tilde] = LRSDL_updateZ(Y, D_bar, D_tilde, Z_bar, Z_tilde, optsZ);
+        [D_bar, D_tilde] = LRSDL_updateD_fast_mod2_lr(Y, Y_range, D_bar, D_tilde, Z_bar, Z_tilde, opts);
+        % [D_bar, D_tilde, ~] = Solve_permutation(D_bar, D_tilde, Y_range, opts);
+
+        [recon, plain, fisher, nuclear_cost, cost] = compute_cost(Y, Y_range, D_bar, D_tilde, Z_bar, Z_tilde, opts);     
+        if abs(cost - cost_old) < 1e-5
+            fprintf("iter = %d, recon = %f, plain = %f, fisher = %f, nuclear = %f, cost = %f\n", iter, recon, plain, fisher, nuclear_cost, cost);
+            break;
+        end
+        cost_old = cost;
+        if iter >= 200
+            fprintf("iter = %d, recon = %f, plain = %f, fisher = %f, nuclear = %f, cost = %f\n", iter, recon, plain, fisher, nuclear_cost, cost);
+        end
+        % costs = [costs, cost];
+        % diffs = [diffs, cost_diff];       
+        if 0
+            diff_tilde = sum(sum(abs(D_tilde - D_old_tilde)))/opts.k_tilde/size(D_tilde, 1);
+            diff_bar = sum(sum(abs(D_bar - D_old_bar)))/opts.k_bar/size(D_bar, 1);
+            diff = sum(sum(abs([D_bar, D_tilde] - D_old)))/(opts.k_tilde + opts.k_bar)/size(D_tilde, 1);
+            costs = [costs, cost];
+            diff_tildes = [diff_tildes, diff_tilde];
+            diff_bars = [diff_bars, diff_bar];
+            fprintf("iter = %d, k_bar = %d, k_tilde = %d | diff_tilde = %.8f, diff_bar = %.8f, diff = %.8f \n", iter, opts.k_bar, opts.k_tilde, diff_tilde, diff_bar, diff);
+            figure; 
+            plot(costs(1:end));
+            xlabel("iterations");
+            
+            figure; 
+            plot(diff_tildes(10:end));
+            xlabel("iterations");
+            figure; 
+            plot(diff_bars(10:end));
+            xlabel("iterations");
+            figure; 
+            plot(diffs(10:end));
+            xlabel("iterations");
+        end
+        if 0 == mod(iter, 100)
+            fprintf("Training done for iteration %d\n", iter); 
+        end
+        D_old_tilde = D_tilde;
+        D_old_bar = D_bar;
+        D_old = [D_bar, D_tilde];
+    end 
+    disp("Training Done. Refining Z...");
+    %% Refine Z_bar, Z_tilde one more time    
+    [Z_bar, Z_tilde] = LRSDL_updateZ(Y, D_bar, D_tilde, Z_bar, Z_tilde, optsZ);
+    % fn = fullfile("data", "results", "costs_info.mat");
+    % save(fn, "costs", "diffs");
+    disp("Refining Z, Done...");    
+end 
+function [recon, plain, fisher, nuclear_cost, cost] = compute_cost(Y, Y_range, D_bar, D_tilde, Z_bar, Z_tilde, opts)
+    nClasses = numel(Y_range) - 1;
+ 
+    recon = .5*normF2(Y - [D_bar, D_tilde] * [Z_bar; Z_tilde]); 
+    plain = opts.lambda1 * norm1([Z_bar; Z_tilde]);
+    fisher = 0.5 * opts.lambda2 * FDDL_discriminative(D_tilde', Y_range);
+    nuclear_cost = opts.lambda3 * nuclearnorm(D_tilde);
+    cost = recon + plain + fisher + nuclear_cost;
+end 
